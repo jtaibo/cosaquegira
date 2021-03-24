@@ -1,4 +1,5 @@
 #include <SpeedyStepper.h>
+#include <LiquidCrystal_I2C.h>
 
 //#define DEBUG
 #define BAUD_RATE 115200
@@ -9,14 +10,46 @@ const int stepPin = 9;
 const int relayFocusPin = 2;
 const int relayShootPin = 3;
 const int inputPin = 7;
+const int xAxisPin = A0;
+const int yAxisPin = A1;
 const int stepsPerTurn = 200;
 const int pinionTeeth = 8;
 const int rackTeeth = 160;
-// Not-so-static configuration
-const int maxSpeedInStepsPerSecond = 100;
-const int accelInStepsPerSecondPerSecond = 100;
+// Not-so static configuration
+const int deadZoneRadius = 50;
+const int menuPauseTimeInMs = 200;
+// Non-static configuration
+int maxSpeedInStepsPerSecond = 100;
+int accelInStepsPerSecondPerSecond = 100;
+int numberOfShots = 50;
+int pauseBeforeShotInMs = 100;
+int pauseAfterShotInMs = 100;
+bool focus = true;
+int focusTimeInMs = 500;
+int shotTimeInMs = 1000;
+
+char *menu_config_options[] = {
+  "Max. speed (steps/s)",
+  " Accel. (steps/s2)  ",
+  "  Number of shots   ",
+  "Pause bef. shot (ms)",
+  "Pause aft. shot (ms)",
+  "        Focus       ",
+  "   Focus time (ms)  ",
+  "   Shot time (ms)   "
+};
+
+typedef enum {
+  MENU,
+  SHOOTING
+} State;
+
+State state = MENU;
 
 SpeedyStepper azimuthStepper;
+
+LiquidCrystal_I2C lcd(0x3f,20,4);  // set the LCD address to 0x3f for a 20 chars and 4 line display
+
 
 void setup()
 {
@@ -32,6 +65,18 @@ void setup()
   digitalWrite(relayFocusPin, HIGH);
   digitalWrite(relayShootPin, HIGH);
 
+  // Initialize display
+  lcd.init();
+  lcd.clear();
+  lcd.backlight();
+  lcd.setCursor(0,1);
+  lcd.print("01234567890123456789");
+  lcd.setCursor(0,0);
+  lcd.print("La cosa que gira(TM)");
+
+  // Initialize controller
+  pinMode(inputPin, INPUT_PULLUP);
+
 #ifdef DEBUG
   Serial.begin(BAUD_RATE);
   Serial.println("CosaQueGira - initialized!");
@@ -44,10 +89,12 @@ void setup()
 void focusAndShoot()
 {
    // Focus, wait for two seconds to set focus, then shoot and wait half a second, just in case
-   digitalWrite(relayFocusPin, LOW);
-   delay(2000);
+   if ( focus ) {
+     digitalWrite(relayFocusPin, LOW);
+     delay(focusTimeInMs);
+   }
    digitalWrite(relayShootPin, LOW);
-   delay(500);
+   delay(shotTimeInMs);
    digitalWrite(relayFocusPin, HIGH);
    digitalWrite(relayShootPin, HIGH);
 }
@@ -57,31 +104,175 @@ void focusAndShoot()
  */
 void shootRound(int num_shots, int ccw)
 {
+  // Update max. speed and acceleration from current configuration
+  azimuthStepper.setSpeedInStepsPerSecond(maxSpeedInStepsPerSecond);
+  azimuthStepper.setAccelerationInStepsPerSecondPerSecond(accelInStepsPerSecondPerSecond);
+  // Reset stepper position to 0
+  azimuthStepper.setCurrentPositionInSteps(0);
+
+  // Update display
+  //lcd.clear();
+  lcd.setCursor(0,1);
+  lcd.print("-- SHOOTING TIME ---");
+  lcd.setCursor(0,2);
+  lcd.print(" Shot      Angle    ");
+
   // Total steps in one revolution of the platform
   int total_steps = stepsPerTurn * rackTeeth / pinionTeeth;
   float stepsPerShot = total_steps / num_shots;
 
   for( int current_shot = 0 ; current_shot < num_shots ; current_shot++ ) {
     int target_step = current_shot * stepsPerShot + stepsPerShot;
+    int current_angle = 360. * target_step / total_steps;
+
+    // Update display
+    char line_buf[21];
+    sprintf(line_buf, " %03d/%03d    %03d     ", current_shot+1, num_shots, current_angle);
+    lcd.setCursor(0,3);
+    lcd.print(line_buf);
+    //lcd.print(" 000/000    000     ");
+    //lcd.print("                    ");
+
     azimuthStepper.moveToPositionInSteps(target_step);
-    delay(200); // Wait to stabilize before shooting
+    delay(pauseBeforeShotInMs); // Wait to stabilize before shooting
     focusAndShoot();
-    delay(500); // Wait a bit, just in case of long exposure
+    delay(pauseAfterShotInMs); // Wait a bit, just in case of long exposure
+  }
+
+  // Shooting finished. Wait for a button press
+  while ( digitalRead(inputPin) == HIGH );
+  state = MENU;
+}
+
+
+/**
+ * 
+ */
+void menuLoop()
+{
+  lcd.setCursor(0,0);
+  lcd.print("La Cosa que Gira(TM)");
+  lcd.setCursor(0,1);
+  lcd.print(" -- CONFIG MENU --- ");
+  int option = 0;
+  int num_options = 8;
+  bool click = false;
+  while ( state == MENU ) {
+    // Present option
+    lcd.setCursor(0,2);
+    lcd.print(menu_config_options[option]);
+    lcd.setCursor(0,3);
+    lcd.print("                    ");
+    lcd.setCursor(3,3);
+    switch(option) {      
+      case 0: // Max. speed (steps/s)
+        lcd.print(maxSpeedInStepsPerSecond);
+        break;
+      case 1: // Accel. (steps/s2)
+        lcd.print(accelInStepsPerSecondPerSecond);
+        break;
+      case 2: // Number of shots
+        lcd.print(numberOfShots);
+        break;
+      case 3: // Pause bef. shot (ms)
+        lcd.print(pauseBeforeShotInMs);
+        break;
+      case 4: // Pause aft. shot (ms)
+        lcd.print(pauseAfterShotInMs);
+        break;
+      case 5: // Focus
+        lcd.print(focus?"ENABLED":"DISABLED");
+        break;
+      case 6: // Focus time (ms)
+        lcd.print(focusTimeInMs);
+        break;
+      case 7: // Shot time (ms)
+        lcd.print(shotTimeInMs);
+        break;
+    }
+    
+    delay(menuPauseTimeInMs); // Wait a moment to avoid event flooding
+    
+    // Process events
+    while ( true ) {
+      int input = digitalRead(inputPin);
+      click = (input == LOW);
+      if ( click ) {
+        state = SHOOTING;
+        break;
+      }
+      int y = analogRead(yAxisPin);
+      if ( y > 512 + deadZoneRadius ) {
+        option = (option + 1) % num_options;
+        break;
+      }
+      else if ( y < 512 - deadZoneRadius ) {
+        option--;
+        if ( option < 0 )
+          option = num_options-1;
+        break;
+      }
+      int x = analogRead(xAxisPin);
+      int modif = 0;
+      if ( x > 512 + deadZoneRadius ) {
+        // Increment value
+        modif = 1;
+      }
+      else if ( x < 512 - deadZoneRadius ) {
+        // Decrement value
+        modif = -1;
+      }
+      if ( modif ) {
+        switch(option) {
+          case 0: // Max. speed (steps/s)
+            maxSpeedInStepsPerSecond += modif * 10;
+            break;
+          case 1: // Accel. (steps/s2)
+            accelInStepsPerSecondPerSecond += modif *10;
+            break;
+          case 2: // Number of shots
+            numberOfShots += modif;
+            break;
+          case 3: // Pause bef. shot (ms)
+            pauseBeforeShotInMs += modif * 10;
+            break;
+          case 4: // Pause aft. shot (ms)
+            pauseAfterShotInMs += modif * 10;
+            break;
+          case 5: // Focus
+            focus = ! focus;
+            break;
+          case 6: // Focus time (ms)
+            focusTimeInMs += modif * 10;
+            break;
+          case 7: // Shot time (ms)
+            shotTimeInMs += modif * 10;
+            break;          
+        }
+        break;
+      }
+    }
   }
 }
+
 
 /**
  * 
  */
 void loop()
 {
-  // Wait for start signal (button)
-  int input = digitalRead(inputPin);
-  while ( input == LOW ) {
-    input = digitalRead(inputPin);
+  menuLoop();
+  shootRound(numberOfShots, 1);
+  return;
+
+  
+  switch(state) {
+    case MENU:
+      menuLoop();
+      break;
+    case SHOOTING:
+      shootRound(numberOfShots, 1);
+      break;
   }
 
-  delay(1000);
-  shootRound(10, 1);
-  delay(1000);
 }
