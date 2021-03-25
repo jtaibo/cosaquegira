@@ -1,5 +1,6 @@
 #include <SpeedyStepper.h>
 #include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
 
 //#define DEBUG
 #define BAUD_RATE 115200
@@ -36,7 +37,9 @@ char *menu_config_options[] = {
   "Pause aft. shot (ms)",
   "        Focus       ",
   "   Focus time (ms)  ",
-  "   Shot time (ms)   "
+  "   Shot time (ms)   ",
+  "Store configuration ",
+  "   Reset Settings   "
 };
 
 typedef enum {
@@ -50,9 +53,83 @@ SpeedyStepper azimuthStepper;
 
 LiquidCrystal_I2C lcd(0x3f,20,4);  // set the LCD address to 0x3f for a 20 chars and 4 line display
 
+/**
+ * 
+ */
+void readEEConfig()
+{
+  if ( EEPROM[0] == 1 ) {
+    // Config presence is marked with 1 in address 0
+    int addr = 1;
+    EEPROM.get(addr, maxSpeedInStepsPerSecond);
+    addr += sizeof(maxSpeedInStepsPerSecond);
+    EEPROM.get(addr, accelInStepsPerSecondPerSecond);
+    addr += sizeof(accelInStepsPerSecondPerSecond);
+    EEPROM.get(addr, numberOfShots);
+    addr += sizeof(numberOfShots);
+    EEPROM.get(addr, pauseBeforeShotInMs);
+    addr += sizeof(pauseBeforeShotInMs);
+    EEPROM.get(addr, pauseAfterShotInMs);
+    addr += sizeof(pauseAfterShotInMs);
+    EEPROM.get(addr, focus);
+    addr += sizeof(focus);
+    EEPROM.get(addr, focusTimeInMs);
+    addr += sizeof(focusTimeInMs);
+    EEPROM.get(addr, shotTimeInMs);
+  }
+}
 
+/**
+ * 
+ */
+void writeEEConfig()
+{
+  int addr = 0;
+  EEPROM.put(addr, 1); // First byte mark configuration presence
+  addr += 1;
+  EEPROM.put(addr, maxSpeedInStepsPerSecond);
+  addr += sizeof(maxSpeedInStepsPerSecond);
+  EEPROM.put(addr, accelInStepsPerSecondPerSecond);
+  addr += sizeof(accelInStepsPerSecondPerSecond);
+  EEPROM.put(addr, numberOfShots);
+  addr += sizeof(numberOfShots);
+  EEPROM.put(addr, pauseBeforeShotInMs);
+  addr += sizeof(pauseBeforeShotInMs);
+  EEPROM.put(addr, pauseAfterShotInMs);
+  addr += sizeof(pauseAfterShotInMs);
+  EEPROM.put(addr, focus);
+  addr += sizeof(focus);
+  EEPROM.put(addr, focusTimeInMs);
+  addr += sizeof(focusTimeInMs);
+  EEPROM.put(addr, shotTimeInMs);
+}
+
+/**
+ * 
+ */
+void deleteEEConfig()
+{
+  // Mark address with 0 (no config)
+  EEPROM.update(0, 0);
+}
+
+/**
+ * 
+ */
 void setup()
 {
+  // Initialize display
+  lcd.init();
+  lcd.clear();
+  lcd.backlight();
+  lcd.setCursor(0,1);
+  lcd.print("01234567890123456789");
+  lcd.setCursor(0,0);
+  lcd.print("La cosa que gira(TM)");
+
+  // EEPROM
+  readEEConfig();
+
   // Initialize stepper control
   azimuthStepper.connectToPins(stepPin, dirPin);
   azimuthStepper.setStepsPerRevolution(stepsPerTurn);
@@ -64,15 +141,6 @@ void setup()
   pinMode(relayShootPin, OUTPUT);
   digitalWrite(relayFocusPin, HIGH);
   digitalWrite(relayShootPin, HIGH);
-
-  // Initialize display
-  lcd.init();
-  lcd.clear();
-  lcd.backlight();
-  lcd.setCursor(0,1);
-  lcd.print("01234567890123456789");
-  lcd.setCursor(0,0);
-  lcd.print("La cosa que gira(TM)");
 
   // Initialize controller
   pinMode(inputPin, INPUT_PULLUP);
@@ -155,7 +223,7 @@ void menuLoop()
   lcd.setCursor(0,1);
   lcd.print(" -- CONFIG MENU --- ");
   int option = 0;
-  int num_options = 8;
+  int num_options = 10;
   bool click = false;
   while ( state == MENU ) {
     // Present option
@@ -189,6 +257,10 @@ void menuLoop()
       case 7: // Shot time (ms)
         lcd.print(shotTimeInMs);
         break;
+      case 8: // Write config
+      case 9: // Reset settings
+        lcd.print(EEPROM[0]==1?"Config found":"Config not found");
+        break;
     }
     
     delay(menuPauseTimeInMs); // Wait a moment to avoid event flooding
@@ -198,7 +270,17 @@ void menuLoop()
       int input = digitalRead(inputPin);
       click = (input == LOW);
       if ( click ) {
-        state = SHOOTING;
+        switch(option) {
+          case 8: // Write config
+            writeEEConfig();
+            break;
+          case 9: // Reset settings
+            deleteEEConfig();
+            break;
+          default:
+            state = SHOOTING;
+            break;
+        }
         break;
       }
       int y = analogRead(yAxisPin);
@@ -261,11 +343,6 @@ void menuLoop()
  */
 void loop()
 {
-  menuLoop();
-  shootRound(numberOfShots, 1);
-  return;
-
-  
   switch(state) {
     case MENU:
       menuLoop();
