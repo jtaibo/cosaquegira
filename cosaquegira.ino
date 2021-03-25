@@ -195,10 +195,10 @@ void shootRound(int num_shots, int ccw)
 
     // Update display
     char line_buf[21];
-    sprintf(line_buf, " %03d/%03d    %03d     ", current_shot+1, num_shots, current_angle);
+    sprintf(line_buf, " %03d/%03d  %03d (%03d) ", current_shot+1, num_shots, current_angle, 360/num_shots);
     lcd.setCursor(0,3);
     lcd.print(line_buf);
-    //lcd.print(" 000/000    000     ");
+    //lcd.print(" 000/000  000 (000) ");
     //lcd.print("                    ");
 
     azimuthStepper.moveToPositionInSteps(target_step);
