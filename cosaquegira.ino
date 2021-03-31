@@ -28,23 +28,29 @@ int pauseAfterShotInMs = 100;
 bool focus = true;
 int focusTimeInMs = 500;
 int shotTimeInMs = 1000;
+bool ccw = true;
 
-char *menu_config_options[] = {
+#define NUM_MENU_OPTIONS 12
+
+char *menu_config_options[NUM_MENU_OPTIONS] = {
   "Max. speed (steps/s)",
   " Accel. (steps/s2)  ",
   "  Number of shots   ",
+  " Rotation direction ",
   "Pause bef. shot (ms)",
   "Pause aft. shot (ms)",
   "        Focus       ",
   "   Focus time (ms)  ",
   "   Shot time (ms)   ",
   "Store configuration ",
-  "   Reset Settings   "
+  "   Reset Settings   ",
+  "Continuous rotation "
 };
 
 typedef enum {
   MENU,
-  SHOOTING
+  SHOOTING,
+  CONTINUOUS_ROTATION
 } State;
 
 State state = MENU;
@@ -67,6 +73,8 @@ void readEEConfig()
     addr += sizeof(accelInStepsPerSecondPerSecond);
     EEPROM.get(addr, numberOfShots);
     addr += sizeof(numberOfShots);
+    EEPROM.get(addr, ccw);
+    addr += sizeof(ccw);
     EEPROM.get(addr, pauseBeforeShotInMs);
     addr += sizeof(pauseBeforeShotInMs);
     EEPROM.get(addr, pauseAfterShotInMs);
@@ -93,6 +101,8 @@ void writeEEConfig()
   addr += sizeof(accelInStepsPerSecondPerSecond);
   EEPROM.put(addr, numberOfShots);
   addr += sizeof(numberOfShots);
+  EEPROM.put(addr, ccw);
+  addr += sizeof(ccw);
   EEPROM.put(addr, pauseBeforeShotInMs);
   addr += sizeof(pauseBeforeShotInMs);
   EEPROM.put(addr, pauseAfterShotInMs);
@@ -170,7 +180,7 @@ void focusAndShoot()
 /**
  * Shoot round. Take "num_shots" shots around 360º azimuth in "ccw" direction
  */
-void shootRound(int num_shots, int ccw)
+void shootRound(int num_shots, bool ccw)
 {
   // Update max. speed and acceleration from current configuration
   azimuthStepper.setSpeedInStepsPerSecond(maxSpeedInStepsPerSecond);
@@ -201,6 +211,7 @@ void shootRound(int num_shots, int ccw)
     //lcd.print(" 000/000  000 (000) ");
     //lcd.print("                    ");
 
+    target_step *= ccw?-1:1;
     azimuthStepper.moveToPositionInSteps(target_step);
     delay(pauseBeforeShotInMs); // Wait to stabilize before shooting
     focusAndShoot();
@@ -216,6 +227,67 @@ void shootRound(int num_shots, int ccw)
 /**
  * 
  */
+void continuousRotation()
+{
+  int far_far_away = 32000;
+  far_far_away *= ccw?-1:1;
+
+  // Update max. speed and acceleration from current configuration
+  azimuthStepper.setSpeedInStepsPerSecond(maxSpeedInStepsPerSecond);
+  azimuthStepper.setAccelerationInStepsPerSecondPerSecond(accelInStepsPerSecondPerSecond);
+
+  int total_steps = stepsPerTurn * rackTeeth / pinionTeeth;
+
+  // Show static info in display
+  lcd.setCursor(0,1);
+  lcd.print("-- ROTATING TIME ---");
+  lcd.setCursor(0,2);
+  lcd.print(" Steps      Angle   ");
+  lcd.setCursor(0,3);
+  lcd.print("                    ");
+
+  delay(menuPauseTimeInMs); // Wait a moment to avoid event flooding
+
+  while( true ) {
+    // Reset stepper position to 0
+    azimuthStepper.setCurrentPositionInSteps(0);
+    azimuthStepper.setupMoveInSteps(far_far_away);
+
+    unsigned long display_update_cycle = 1000; // in ms
+    unsigned long last_update_time = millis();
+
+    while(!azimuthStepper.motionComplete()) {
+
+      azimuthStepper.processMovement();
+
+      if ( true /*interactive*/ ) {
+        // Display disabled because it affects rotation performance
+        if ( false && millis()-last_update_time > display_update_cycle ) {
+          // Update display
+          int steps = azimuthStepper.getCurrentPositionInSteps();
+          int angle = 360. * steps / total_steps;
+          char line_buf[21];
+          sprintf(line_buf, " %05d     %d deg", steps, angle);
+          lcd.setCursor(0,3);
+          lcd.print(line_buf);
+          last_update_time = millis();
+        }
+
+        // Check exit event
+        int input = digitalRead(inputPin);
+        if (input == LOW) { // click --> STOP and back to MENU
+          azimuthStepper.setupStop();
+          state = MENU;
+          return;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 
+ */
 void menuLoop()
 {
   lcd.setCursor(0,0);
@@ -223,7 +295,6 @@ void menuLoop()
   lcd.setCursor(0,1);
   lcd.print(" -- CONFIG MENU --- ");
   int option = 0;
-  int num_options = 10;
   bool click = false;
   while ( state == MENU ) {
     // Present option
@@ -242,24 +313,30 @@ void menuLoop()
       case 2: // Number of shots
         lcd.print(numberOfShots);
         break;
-      case 3: // Pause bef. shot (ms)
+      case 3: // Number of shots
+        lcd.print(ccw?"CCW":"CW");
+        break;
+      case 4: // Pause bef. shot (ms)
         lcd.print(pauseBeforeShotInMs);
         break;
-      case 4: // Pause aft. shot (ms)
+      case 5: // Pause aft. shot (ms)
         lcd.print(pauseAfterShotInMs);
         break;
-      case 5: // Focus
+      case 6: // Focus
         lcd.print(focus?"ENABLED":"DISABLED");
         break;
-      case 6: // Focus time (ms)
+      case 7: // Focus time (ms)
         lcd.print(focusTimeInMs);
         break;
-      case 7: // Shot time (ms)
+      case 8: // Shot time (ms)
         lcd.print(shotTimeInMs);
         break;
-      case 8: // Write config
-      case 9: // Reset settings
+      case 9: // Write config
+      case 10: // Reset settings
         lcd.print(EEPROM[0]==1?"Config found":"Config not found");
+        break;
+      case 11:  // Continuous rotation
+        lcd.print("Press to engage");
         break;
     }
     
@@ -271,11 +348,14 @@ void menuLoop()
       click = (input == LOW);
       if ( click ) {
         switch(option) {
-          case 8: // Write config
+          case 9: // Write config
             writeEEConfig();
             break;
-          case 9: // Reset settings
+          case 10: // Reset settings
             deleteEEConfig();
+            break;
+          case 11:
+            state = CONTINUOUS_ROTATION;
             break;
           default:
             state = SHOOTING;
@@ -285,13 +365,13 @@ void menuLoop()
       }
       int y = analogRead(yAxisPin);
       if ( y > 512 + deadZoneRadius ) {
-        option = (option + 1) % num_options;
+        option = (option + 1) % NUM_MENU_OPTIONS;
         break;
       }
       else if ( y < 512 - deadZoneRadius ) {
         option--;
         if ( option < 0 )
-          option = num_options-1;
+          option = NUM_MENU_OPTIONS-1;
         break;
       }
       int x = analogRead(xAxisPin);
@@ -315,19 +395,22 @@ void menuLoop()
           case 2: // Number of shots
             numberOfShots += modif;
             break;
-          case 3: // Pause bef. shot (ms)
+          case 3: // Rotation direction
+            ccw = !ccw;
+            break;
+          case 4: // Pause bef. shot (ms)
             pauseBeforeShotInMs += modif * 10;
             break;
-          case 4: // Pause aft. shot (ms)
+          case 5: // Pause aft. shot (ms)
             pauseAfterShotInMs += modif * 10;
             break;
-          case 5: // Focus
+          case 6: // Focus
             focus = ! focus;
             break;
-          case 6: // Focus time (ms)
+          case 7: // Focus time (ms)
             focusTimeInMs += modif * 10;
             break;
-          case 7: // Shot time (ms)
+          case 8: // Shot time (ms)
             shotTimeInMs += modif * 10;
             break;          
         }
@@ -348,8 +431,10 @@ void loop()
       menuLoop();
       break;
     case SHOOTING:
-      shootRound(numberOfShots, 1);
+      shootRound(numberOfShots, ccw);
+      break;
+    case CONTINUOUS_ROTATION:
+      continuousRotation();
       break;
   }
-
 }
