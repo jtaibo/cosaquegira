@@ -30,7 +30,7 @@ int focusTimeInMs = 500;
 int shotTimeInMs = 1000;
 bool ccw = true;
 
-#define NUM_MENU_OPTIONS 12
+#define NUM_MENU_OPTIONS 13
 
 char *menu_config_options[NUM_MENU_OPTIONS] = {
   "Max. speed (steps/s)",
@@ -44,16 +44,19 @@ char *menu_config_options[NUM_MENU_OPTIONS] = {
   "   Shot time (ms)   ",
   "Store configuration ",
   "   Reset Settings   ",
-  "Continuous rotation "
+  "Continuous rotation ",
+  "     PC Control     "
 };
 
 typedef enum {
   MENU,
   SHOOTING,
-  CONTINUOUS_ROTATION
+  CONTINUOUS_ROTATION,
+  PC_CONTROL
 } State;
 
-State state = MENU;
+//State state = MENU;
+State state = PC_CONTROL;
 
 SpeedyStepper azimuthStepper;
 
@@ -155,10 +158,10 @@ void setup()
   // Initialize controller
   pinMode(inputPin, INPUT_PULLUP);
 
-#ifdef DEBUG
+//#ifdef DEBUG
   Serial.begin(BAUD_RATE);
   Serial.println("CosaQueGira - initialized!");
-#endif
+//#endif
 }
 
 /**
@@ -338,6 +341,9 @@ void menuLoop()
       case 11:  // Continuous rotation
         lcd.print("Press to engage");
         break;
+      case 12:  // PC Control
+        lcd.print("Press to activate");
+        break;
     }
     
     delay(menuPauseTimeInMs); // Wait a moment to avoid event flooding
@@ -356,6 +362,9 @@ void menuLoop()
             break;
           case 11:
             state = CONTINUOUS_ROTATION;
+            break;
+          case 12:
+            state = PC_CONTROL;
             break;
           default:
             state = SHOOTING;
@@ -411,7 +420,7 @@ void menuLoop()
             focusTimeInMs += modif * 10;
             break;
           case 8: // Shot time (ms)
-            shotTimeInMs += modif * 10;
+            shotTimeInMs += modif * 100;
             break;          
         }
         break;
@@ -420,6 +429,210 @@ void menuLoop()
   }
 }
 
+typedef enum {
+  DISCONNECTED, // Before handshake
+  HANDSHAKE,    // Handshake in progress
+  CONNECTED,    // Handshake successful
+  UNKNOWN
+} CommState;
+
+CommState commState;
+
+/**
+ * 
+ */
+void send(char *msg)
+{
+  Serial.println(msg);
+}
+
+/**
+ * 
+ */
+String receive()
+{
+  String msg;
+  msg = Serial.readStringUntil('\n');
+  return msg.substring(0,msg.length()-1);
+}
+
+/**
+ * 
+ */
+bool handshake()
+{
+  // Send handshake message
+  int max_retries = 5;
+  int try_1s = 0;
+  while ( commState == DISCONNECTED && try_1s++ < max_retries ) {
+    send("HEY_BOY");
+    String response = receive();
+
+    if ( response == "HEY_GIRL" ) {
+      lcd.setCursor(0,2);
+      lcd.print("    Handshaking     ");
+      commState = HANDSHAKE;
+      int try_2s = 0;
+      while( commState == HANDSHAKE && try_2s++ < max_retries ) {
+        send("SUPERSTAR_DJS");
+        response = receive();
+        if( response == "HERE_WE_GO!" ) {
+          commState = CONNECTED;
+          lcd.setCursor(0,2);
+          lcd.print("   CONNECTION OK!   ");
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+int pc_control_current_shot = 1;
+
+/**
+ * 
+ */
+void doRotate()
+{
+  // Total steps in one revolution of the platform
+  int total_steps = stepsPerTurn * rackTeeth / pinionTeeth;
+  float stepsPerShot = total_steps / numberOfShots;
+
+  int target_step = pc_control_current_shot * stepsPerShot + stepsPerShot;
+  int current_angle = 360. * target_step / total_steps;
+
+  // Update display
+  char line_buf[21];
+  sprintf(line_buf, " %03d/%03d  %03d (%03d) ", pc_control_current_shot++, numberOfShots, current_angle, 360/numberOfShots);
+  lcd.setCursor(0,3);
+  lcd.print(line_buf);
+  //lcd.print(" 000/000  000 (000) ");
+  //lcd.print("                    ");
+
+  target_step *= ccw?-1:1;
+  azimuthStepper.moveToPositionInSteps(target_step);
+  send("ROTATE");
+}
+
+/**
+ * 
+ */
+void doFocus()
+{
+  digitalWrite(relayFocusPin, LOW);
+  send("FOCUS");
+}
+
+/**
+ * 
+ */
+void doShoot(int pause_time_ms=100)
+{
+  digitalWrite(relayShootPin, LOW);
+  delay(pause_time_ms);
+  digitalWrite(relayShootPin, HIGH);
+  digitalWrite(relayFocusPin, HIGH);
+  send("SHOOT");
+}
+
+/**
+ * 
+ */
+void pcControlLoop()
+{
+  commState = DISCONNECTED;
+
+  // Update display
+  //lcd.clear();
+  lcd.setCursor(0,1);
+  lcd.print("---  PC CONTROL  ---");
+  lcd.setCursor(0,2);
+  lcd.print("    Disconnected    ");
+  lcd.setCursor(0,3);
+  lcd.print("                    ");
+
+  // Handshake
+  if ( ! handshake() ) {
+    // Handhsake failed. Back to menu
+    lcd.setCursor(0,2);
+    lcd.print("  Handshake failed  ");
+    delay(2000);
+    state = MENU;
+    return;
+  }
+
+  // Update max. speed and acceleration from current configuration
+  azimuthStepper.setSpeedInStepsPerSecond(maxSpeedInStepsPerSecond);
+  azimuthStepper.setAccelerationInStepsPerSecondPerSecond(accelInStepsPerSecondPerSecond);
+  // Reset stepper position to 0
+  azimuthStepper.setCurrentPositionInSteps(0);
+
+  while( commState == CONNECTED ) {
+
+    while ( ! Serial.available() > 0 ) {
+      // wait for inputs
+
+      // TO-DO: Check disconnection request from pysical inputs (joystick)
+    }
+
+    String msg = receive();
+
+    if( msg == "DISCONNECT" ) {
+      send("BYE");
+      lcd.setCursor(0,2);
+      lcd.print(" Connection closed  ");
+      delay(2000);
+      commState = DISCONNECTED;
+      state = MENU;
+      break;
+    }
+    else if ( msg.startsWith("NUM_SHOTS ") ) {
+      numberOfShots = msg.substring(10).toInt();
+      pc_control_current_shot = 1;
+      lcd.setCursor(0,2);
+      lcd.print("                    ");
+      lcd.setCursor(0,2);
+      lcd.print("# of shots = ");
+      lcd.print(numberOfShots);
+      lcd.setCursor(0,3);
+      lcd.print("                    ");
+    }
+    else if ( msg == "ROTATE" ) {
+      lcd.setCursor(0,2);
+      lcd.print("  Rotating to next  ");
+      lcd.setCursor(0,3);
+      lcd.print("   shoot position   ");
+      doRotate();
+    }
+    else if ( msg == "FOCUS" ) {
+      lcd.setCursor(0,2);
+      lcd.print("        FOCUS        ");
+      lcd.setCursor(0,3);
+      lcd.print("                    ");
+      doFocus();
+    }
+    else if ( msg.startsWith("SHOOT") ) {
+      lcd.setCursor(0,2);
+      lcd.print("        SHOOT        ");
+      lcd.setCursor(0,3);
+      lcd.print("                    ");
+      if(msg.length() > 6) {
+        int pause_time = msg.substring(6).toInt();
+        doShoot(pause_time);
+      }
+    }
+    else {
+      // Unknown message
+      lcd.setCursor(0,2);
+      lcd.print("   Wrong message    ");
+      lcd.setCursor(0,3);
+      lcd.print("                    ");
+      lcd.setCursor(0,3);
+      lcd.print(msg);
+    }
+  }
+}
 
 /**
  * 
@@ -427,6 +640,9 @@ void menuLoop()
 void loop()
 {
   switch(state) {
+    case PC_CONTROL:
+      pcControlLoop();
+      break;
     case MENU:
       menuLoop();
       break;
